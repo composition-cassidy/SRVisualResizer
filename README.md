@@ -2,7 +2,7 @@
 
 A Vegas Pro script for quickly resizing video tracks into grid layouts for Sparta Remixes and YTPMVs.
 
-![A screenshot of the script.](UI.png)
+![A screenshot of the script.](UInew.png)
 
 ## What It Does
 
