@@ -2,6 +2,8 @@
 
 A Vegas Pro script for quickly resizing video tracks into grid layouts for Sparta Remixes and YTPMVs.
 
+![A screenshot of the script.](UI.png)
+
 ## What It Does
 
 Automatically calculates and applies box visual dimensions for grid-based video layouts. Instead of manually dividing track sizes and positioning each visual, this script does the math for you.
