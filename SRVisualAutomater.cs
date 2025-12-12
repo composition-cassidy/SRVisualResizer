@@ -1,6 +1,6 @@
 /**
  * Sparta Remix Visual Automater
- * Resizes video tracks based on grid layout
+ * Resizes and positions video tracks based on grid layout
  * Multi-track support: processes all selected video tracks
  * WARNING: This will overwrite all existing Track Motion keyframes
  */
@@ -8,6 +8,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Windows.Forms;
 using ScriptPortal.Vegas;
@@ -28,38 +29,64 @@ public class EntryPoint
         }
     }
 
-    private static int LoadScaleValue()
+    private static void LoadSettings(out int scaleValue, out int gridSize)
     {
+        scaleValue = 1000;
+        gridSize = 2;
         try
         {
             if (System.IO.File.Exists(SettingsFilePath))
             {
-                string content = System.IO.File.ReadAllText(SettingsFilePath);
-                int value;
-                if (int.TryParse(content.Trim(), out value))
+                string[] lines = System.IO.File.ReadAllLines(SettingsFilePath);
+                if (lines.Length >= 1)
                 {
-                    if (value >= 700 && value <= 1000)
+                    int value;
+                    if (int.TryParse(lines[0].Trim(), out value) && value >= 700 && value <= 1000)
                     {
-                        return value;
+                        scaleValue = value;
+                    }
+                }
+                if (lines.Length >= 2)
+                {
+                    int value;
+                    if (int.TryParse(lines[1].Trim(), out value) && value >= 2 && value <= 6)
+                    {
+                        gridSize = value;
                     }
                 }
             }
         }
         catch { }
-        return 1000; // Default 100%
     }
 
-    private static void SaveScaleValue(int value)
+    private static void SaveSettings(int scaleValue, int gridSize)
     {
         try
         {
-            System.IO.File.WriteAllText(SettingsFilePath, value.ToString());
+            System.IO.File.WriteAllText(SettingsFilePath, scaleValue.ToString() + "\n" + gridSize.ToString());
         }
         catch { }
     }
 
     public void FromVegas(Vegas vegas)
     {
+        // Collect all selected video tracks first
+        List<VideoTrack> selectedTracks = new List<VideoTrack>();
+        foreach (Track track in vegas.Project.Tracks)
+        {
+            if (track.Selected && track.IsVideo())
+            {
+                selectedTracks.Add((VideoTrack)track);
+            }
+        }
+
+        if (selectedTracks.Count == 0)
+        {
+            MessageBox.Show("No video tracks selected. Please select at least one video track.",
+                           "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
         // DPI-aware scaling
         double dpiScale;
         using (Graphics graphics = Graphics.FromHwnd(IntPtr.Zero))
@@ -67,178 +94,381 @@ public class EntryPoint
             dpiScale = graphics.DpiX / 96.0;
         }
 
+        // Load saved settings
+        int savedScale, savedGridSize;
+        LoadSettings(out savedScale, out savedGridSize);
+
+        // Grid cell assignments: Dictionary<cellIndex, List<VideoTrack>>
+        Dictionary<int, List<VideoTrack>> cellAssignments = new Dictionary<int, List<VideoTrack>>();
+        
+        // Track the currently selected track for click-to-place
+        VideoTrack selectedTrackForPlacement = null;
+
         Form form = new Form();
         form.Text = "Sparta Remix Visual Automater";
         form.FormBorderStyle = FormBorderStyle.FixedDialog;
         form.MaximizeBox = false;
         form.MinimizeBox = false;
         form.StartPosition = FormStartPosition.CenterScreen;
-        form.Font = new Font("Segoe UI", (float)(8.25 * dpiScale));
+        form.Font = new Font("Segoe UI", (float)(9 * dpiScale));
         form.BackColor = Color.FromArgb(45, 45, 48);
         form.ForeColor = Color.White;
-        form.AutoSize = true;
-        form.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        form.Padding = new Padding((int)(16 * dpiScale));
+        form.Size = new Size((int)(700 * dpiScale), (int)(580 * dpiScale));
 
-        FlowLayoutPanel mainLayout = new FlowLayoutPanel();
-        mainLayout.Dock = DockStyle.Fill;
-        mainLayout.FlowDirection = FlowDirection.TopDown;
-        mainLayout.AutoSize = true;
-        mainLayout.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        mainLayout.WrapContents = false;
-        mainLayout.Padding = new Padding(0);
-        mainLayout.Margin = new Padding(0);
-        form.Controls.Add(mainLayout);
+        // Main horizontal split
+        TableLayoutPanel mainContainer = new TableLayoutPanel();
+        mainContainer.Dock = DockStyle.Fill;
+        mainContainer.ColumnCount = 2;
+        mainContainer.RowCount = 1;
+        mainContainer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, (int)(220 * dpiScale)));
+        mainContainer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        mainContainer.Padding = new Padding((int)(12 * dpiScale));
+        form.Controls.Add(mainContainer);
+
+        // Left panel - Controls
+        FlowLayoutPanel leftPanel = new FlowLayoutPanel();
+        leftPanel.Dock = DockStyle.Fill;
+        leftPanel.FlowDirection = FlowDirection.TopDown;
+        leftPanel.WrapContents = false;
+        leftPanel.AutoScroll = true;
+        mainContainer.Controls.Add(leftPanel, 0, 0);
 
         // Grid size selection
         GroupBox gridGroup = new GroupBox();
         gridGroup.Text = "Grid Layout";
-        gridGroup.AutoSize = true;
-        gridGroup.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        gridGroup.Width = (int)(195 * dpiScale);
+        gridGroup.Height = (int)(110 * dpiScale);
         gridGroup.ForeColor = Color.White;
         gridGroup.BackColor = Color.Transparent;
-        gridGroup.Padding = new Padding((int)(10 * dpiScale), (int)(12 * dpiScale), (int)(10 * dpiScale), (int)(10 * dpiScale));
 
         TableLayoutPanel gridTable = new TableLayoutPanel();
         gridTable.ColumnCount = 2;
         gridTable.RowCount = 3;
-        gridTable.AutoSize = true;
-        gridTable.AutoSizeMode = AutoSizeMode.GrowAndShrink;
         gridTable.Dock = DockStyle.Fill;
-        gridTable.GrowStyle = TableLayoutPanelGrowStyle.FixedSize;
         gridTable.BackColor = Color.Transparent;
-        for (int i = 0; i < 2; i++)
+
+        RadioButton[] gridRadios = new RadioButton[5];
+        int[] gridSizes = { 2, 3, 4, 5, 6 };
+        string[] gridLabels = { "2×2", "3×3", "4×4", "5×5", "6×6" };
+
+        for (int i = 0; i < 5; i++)
         {
-            gridTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
+            gridRadios[i] = new RadioButton();
+            gridRadios[i].Text = gridLabels[i];
+            gridRadios[i].Tag = gridSizes[i];
+            gridRadios[i].ForeColor = Color.White;
+            gridRadios[i].AutoSize = true;
+            gridRadios[i].Margin = new Padding((int)(4 * dpiScale));
+            if (gridSizes[i] == savedGridSize)
+            {
+                gridRadios[i].Checked = true;
+            }
         }
-        for (int i = 0; i < 3; i++)
-        {
-            gridTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        }
 
-        RadioButton grid2x2 = new RadioButton();
-        grid2x2.Text = "2×2";
-        grid2x2.Checked = true;
-        grid2x2.Tag = 2;
-        grid2x2.ForeColor = Color.White;
-        grid2x2.AutoSize = true;
-        grid2x2.Margin = new Padding((int)(4 * dpiScale));
-
-        RadioButton grid3x3 = new RadioButton();
-        grid3x3.Text = "3×3";
-        grid3x3.Tag = 3;
-        grid3x3.ForeColor = Color.White;
-        grid3x3.AutoSize = true;
-        grid3x3.Margin = new Padding((int)(4 * dpiScale));
-
-        RadioButton grid4x4 = new RadioButton();
-        grid4x4.Text = "4×4";
-        grid4x4.Tag = 4;
-        grid4x4.ForeColor = Color.White;
-        grid4x4.AutoSize = true;
-        grid4x4.Margin = new Padding((int)(4 * dpiScale));
-
-        RadioButton grid5x5 = new RadioButton();
-        grid5x5.Text = "5×5";
-        grid5x5.Tag = 5;
-        grid5x5.ForeColor = Color.White;
-        grid5x5.AutoSize = true;
-        grid5x5.Margin = new Padding((int)(4 * dpiScale));
-
-        RadioButton grid6x6 = new RadioButton();
-        grid6x6.Text = "6×6";
-        grid6x6.Tag = 6;
-        grid6x6.ForeColor = Color.White;
-        grid6x6.AutoSize = true;
-        grid6x6.Margin = new Padding((int)(4 * dpiScale));
-
-        gridTable.Controls.Add(grid2x2, 0, 0);
-        gridTable.Controls.Add(grid3x3, 1, 0);
-        gridTable.Controls.Add(grid4x4, 0, 1);
-        gridTable.Controls.Add(grid5x5, 1, 1);
-        gridTable.Controls.Add(grid6x6, 0, 2);
+        gridTable.Controls.Add(gridRadios[0], 0, 0);
+        gridTable.Controls.Add(gridRadios[1], 1, 0);
+        gridTable.Controls.Add(gridRadios[2], 0, 1);
+        gridTable.Controls.Add(gridRadios[3], 1, 1);
+        gridTable.Controls.Add(gridRadios[4], 0, 2);
 
         gridGroup.Controls.Add(gridTable);
-        mainLayout.Controls.Add(gridGroup);
+        leftPanel.Controls.Add(gridGroup);
 
-        // Size reduction slider
-        FlowLayoutPanel scalePanel = new FlowLayoutPanel();
-        scalePanel.AutoSize = true;
-        scalePanel.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        scalePanel.Margin = new Padding(0, (int)(10 * dpiScale), 0, 0);
-        scalePanel.BackColor = Color.Transparent;
-        scalePanel.FlowDirection = FlowDirection.TopDown;
-        scalePanel.WrapContents = false;
+        // Track list
+        GroupBox trackGroup = new GroupBox();
+        trackGroup.Text = "Unassigned Tracks";
+        trackGroup.Width = (int)(195 * dpiScale);
+        trackGroup.Height = (int)(180 * dpiScale);
+        trackGroup.ForeColor = Color.White;
+        trackGroup.Margin = new Padding(0, (int)(8 * dpiScale), 0, 0);
 
-        Label scaleNoteLabel = new Label();
-        scaleNoteLabel.Text = "This slider will scale the visual further by your chosen percentage. Leave it at 100% to have perfectly sized boxes.";
-        scaleNoteLabel.ForeColor = Color.FromArgb(200, 200, 200);
-        scaleNoteLabel.AutoSize = true;
-        scaleNoteLabel.MaximumSize = new Size((int)(240 * dpiScale), 0);
-        scaleNoteLabel.Margin = new Padding(0, 0, 0, (int)(6 * dpiScale));
+        ListBox trackListBox = new ListBox();
+        trackListBox.Dock = DockStyle.Fill;
+        trackListBox.BackColor = Color.FromArgb(30, 30, 30);
+        trackListBox.ForeColor = Color.White;
+        trackListBox.BorderStyle = BorderStyle.None;
+        trackListBox.Font = new Font("Segoe UI", (float)(9 * dpiScale));
 
-        Label scaleLabel = new Label();
-        scaleLabel.Text = string.Format("Scale: {0:F1}%", LoadScaleValue() / 10.0);
-        scaleLabel.ForeColor = Color.White;
-        scaleLabel.AutoSize = true;
-        scaleLabel.Margin = new Padding(0, 0, 0, (int)(4 * dpiScale));
-
-        TrackBar scaleSlider = new TrackBar();
-        scaleSlider.Minimum = 700; // 70%
-        scaleSlider.Maximum = 1000; // 100%
-        scaleSlider.Value = LoadScaleValue(); // Load saved value
-        scaleSlider.TickFrequency = 25;
-        scaleSlider.AutoSize = false;
-        scaleSlider.Width = (int)(220 * dpiScale);
-        scaleSlider.Height = (int)(28 * dpiScale);
-        scaleSlider.BackColor = Color.FromArgb(45, 45, 48);
-        scaleSlider.Margin = new Padding(0);
-        scaleSlider.ValueChanged += (sender, e) =>
+        // Function to refresh the track list (show only unassigned tracks)
+        Action refreshTrackList = null;
+        refreshTrackList = () =>
         {
-            double percent = scaleSlider.Value / 10.0;
-            scaleLabel.Text = string.Format("Scale: {0:F1}%", percent);
-            SaveScaleValue(scaleSlider.Value); // Save when changed
+            trackListBox.Items.Clear();
+            foreach (VideoTrack vt in selectedTracks)
+            {
+                // Check if this track is assigned to any cell
+                bool isAssigned = false;
+                foreach (var kvp in cellAssignments)
+                {
+                    if (kvp.Value.Contains(vt))
+                    {
+                        isAssigned = true;
+                        break;
+                    }
+                }
+                if (!isAssigned)
+                {
+                    string displayName = string.IsNullOrEmpty(vt.Name) ? "Track " + vt.Index : vt.Name;
+                    trackListBox.Items.Add(displayName);
+                }
+            }
+            selectedTrackForPlacement = null;
         };
 
-        scalePanel.Controls.Add(scaleNoteLabel);
-        scalePanel.Controls.Add(scaleLabel);
-        scalePanel.Controls.Add(scaleSlider);
-        mainLayout.Controls.Add(scalePanel);
+        // Initial population
+        refreshTrackList();
 
-        // Warning label
+        trackGroup.Controls.Add(trackListBox);
+        leftPanel.Controls.Add(trackGroup);
+
+        // Instructions label
+        Label instructionLabel = new Label();
+        instructionLabel.Text = "1. Select a track from the list\n2. Click a grid cell to place it\n\nClick an assigned cell to\nremove the track.";
+        instructionLabel.ForeColor = Color.FromArgb(180, 180, 180);
+        instructionLabel.AutoSize = true;
+        instructionLabel.MaximumSize = new Size((int)(195 * dpiScale), 0);
+        instructionLabel.Margin = new Padding(0, (int)(8 * dpiScale), 0, 0);
+        leftPanel.Controls.Add(instructionLabel);
+
+        // Scale slider
+        GroupBox scaleGroup = new GroupBox();
+        scaleGroup.Text = "Scale Factor";
+        scaleGroup.Width = (int)(195 * dpiScale);
+        scaleGroup.Height = (int)(80 * dpiScale);
+        scaleGroup.ForeColor = Color.White;
+        scaleGroup.Margin = new Padding(0, (int)(8 * dpiScale), 0, 0);
+
+        FlowLayoutPanel scaleInner = new FlowLayoutPanel();
+        scaleInner.Dock = DockStyle.Fill;
+        scaleInner.FlowDirection = FlowDirection.TopDown;
+        scaleInner.WrapContents = false;
+
+        Label scaleLabel = new Label();
+        scaleLabel.Text = string.Format("Scale: {0:F1}%", savedScale / 10.0);
+        scaleLabel.ForeColor = Color.White;
+        scaleLabel.AutoSize = true;
+
+        TrackBar scaleSlider = new TrackBar();
+        scaleSlider.Minimum = 700;
+        scaleSlider.Maximum = 1000;
+        scaleSlider.Value = savedScale;
+        scaleSlider.TickFrequency = 25;
+        scaleSlider.Width = (int)(170 * dpiScale);
+        scaleSlider.Height = (int)(30 * dpiScale);
+        scaleSlider.BackColor = Color.FromArgb(45, 45, 48);
+
+        scaleSlider.ValueChanged += (sender, e) =>
+        {
+            scaleLabel.Text = string.Format("Scale: {0:F1}%", scaleSlider.Value / 10.0);
+        };
+
+        scaleInner.Controls.Add(scaleLabel);
+        scaleInner.Controls.Add(scaleSlider);
+        scaleGroup.Controls.Add(scaleInner);
+        leftPanel.Controls.Add(scaleGroup);
+
+        // Warning and Apply button
         Label warningLabel = new Label();
         warningLabel.Text = "⚠ WARNING: Deletes all Track Motion keyframes!";
         warningLabel.ForeColor = Color.FromArgb(255, 120, 120);
         warningLabel.AutoSize = true;
-        warningLabel.MaximumSize = new Size((int)(240 * dpiScale), 0);
-        warningLabel.Margin = new Padding(0, (int)(12 * dpiScale), 0, 0);
-        mainLayout.Controls.Add(warningLabel);
-
-        // Apply button
-        FlowLayoutPanel buttonPanel = new FlowLayoutPanel();
-        buttonPanel.AutoSize = true;
-        buttonPanel.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        buttonPanel.Margin = new Padding(0, (int)(12 * dpiScale), 0, 0);
-        buttonPanel.BackColor = Color.Transparent;
-        buttonPanel.FlowDirection = FlowDirection.LeftToRight;
-        buttonPanel.WrapContents = false;
-        buttonPanel.Padding = new Padding(0);
+        warningLabel.MaximumSize = new Size((int)(195 * dpiScale), 0);
+        warningLabel.Margin = new Padding(0, (int)(10 * dpiScale), 0, 0);
+        leftPanel.Controls.Add(warningLabel);
 
         Button applyButton = new Button();
-        applyButton.Text = "Apply to Selected Tracks";
-        applyButton.AutoSize = true;
+        applyButton.Text = "Apply";
+        applyButton.Width = (int)(195 * dpiScale);
+        applyButton.Height = (int)(35 * dpiScale);
         applyButton.DialogResult = DialogResult.OK;
-        applyButton.Padding = new Padding((int)(12 * dpiScale), (int)(6 * dpiScale), (int)(12 * dpiScale), (int)(6 * dpiScale));
-        applyButton.Margin = new Padding(0);
-        applyButton.UseVisualStyleBackColor = false;
         applyButton.FlatStyle = FlatStyle.Flat;
         applyButton.FlatAppearance.BorderSize = 0;
         applyButton.BackColor = Color.FromArgb(0, 122, 204);
         applyButton.ForeColor = Color.White;
         applyButton.Cursor = Cursors.Hand;
+        applyButton.Margin = new Padding(0, (int)(8 * dpiScale), 0, 0);
+        leftPanel.Controls.Add(applyButton);
 
-        buttonPanel.Controls.Add(applyButton);
-        mainLayout.Controls.Add(buttonPanel);
+        // Right panel - Grid visualization
+        Panel gridPanel = new Panel();
+        gridPanel.Dock = DockStyle.Fill;
+        gridPanel.BackColor = Color.FromArgb(60, 60, 65);
+        gridPanel.Margin = new Padding((int)(8 * dpiScale), 0, 0, 0);
+        mainContainer.Controls.Add(gridPanel, 1, 0);
+
+        // Grid cell buttons container
+        TableLayoutPanel gridCellContainer = new TableLayoutPanel();
+        gridCellContainer.Dock = DockStyle.Fill;
+        gridCellContainer.BackColor = Color.Transparent;
+        gridCellContainer.Padding = new Padding((int)(8 * dpiScale));
+        gridPanel.Controls.Add(gridCellContainer);
+
+        // Function to rebuild the grid
+        Action rebuildGrid = null;
+        rebuildGrid = () =>
+        {
+            gridCellContainer.Controls.Clear();
+            gridCellContainer.RowStyles.Clear();
+            gridCellContainer.ColumnStyles.Clear();
+
+            int currentGridSize = 2;
+            foreach (RadioButton rb in gridRadios)
+            {
+                if (rb.Checked)
+                {
+                    currentGridSize = (int)rb.Tag;
+                    break;
+                }
+            }
+
+            gridCellContainer.ColumnCount = currentGridSize;
+            gridCellContainer.RowCount = currentGridSize;
+
+            for (int i = 0; i < currentGridSize; i++)
+            {
+                gridCellContainer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / currentGridSize));
+                gridCellContainer.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / currentGridSize));
+            }
+
+            for (int row = 0; row < currentGridSize; row++)
+            {
+                for (int col = 0; col < currentGridSize; col++)
+                {
+                    int cellIndex = row * currentGridSize + col;
+                    
+                    Panel cellPanel = new Panel();
+                    cellPanel.Dock = DockStyle.Fill;
+                    cellPanel.Margin = new Padding(2);
+                    cellPanel.BackColor = Color.FromArgb(80, 80, 85);
+                    cellPanel.Tag = cellIndex;
+                    cellPanel.Cursor = Cursors.Hand;
+
+                    Label cellLabel = new Label();
+                    cellLabel.Dock = DockStyle.Fill;
+                    cellLabel.TextAlign = ContentAlignment.MiddleCenter;
+                    cellLabel.ForeColor = Color.White;
+                    cellLabel.Font = new Font("Segoe UI", (float)(9 * dpiScale));
+                    cellLabel.BackColor = Color.Transparent;
+
+                    // Update label based on assignments
+                    if (cellAssignments.ContainsKey(cellIndex) && cellAssignments[cellIndex].Count > 0)
+                    {
+                        List<string> names = new List<string>();
+                        foreach (VideoTrack vt in cellAssignments[cellIndex])
+                        {
+                            string name = string.IsNullOrEmpty(vt.Name) ? "Track " + vt.Index : vt.Name;
+                            names.Add("✓ " + name);
+                        }
+                        cellLabel.Text = string.Join("\n", names.ToArray());
+                        cellPanel.BackColor = Color.FromArgb(60, 120, 80);
+                    }
+                    else
+                    {
+                        cellLabel.Text = string.Format("Row {0}, Col {1}", row + 1, col + 1);
+                        cellLabel.ForeColor = Color.FromArgb(120, 120, 120);
+                    }
+
+                    cellPanel.Controls.Add(cellLabel);
+
+                    // Click handler for cell
+                    int capturedRow = row;
+                    int capturedCol = col;
+                    int capturedCellIndex = cellIndex;
+                    
+                    EventHandler cellClick = (sender, e) =>
+                    {
+                        // If cell has assignments and no track is selected, remove last track from cell
+                        if (selectedTrackForPlacement == null && cellAssignments.ContainsKey(capturedCellIndex) && cellAssignments[capturedCellIndex].Count > 0)
+                        {
+                            // Remove the last track from this cell
+                            cellAssignments[capturedCellIndex].RemoveAt(cellAssignments[capturedCellIndex].Count - 1);
+                            if (cellAssignments[capturedCellIndex].Count == 0)
+                            {
+                                cellAssignments.Remove(capturedCellIndex);
+                            }
+                            refreshTrackList();
+                            rebuildGrid();
+                            return;
+                        }
+
+                        if (selectedTrackForPlacement != null)
+                        {
+                            // Remove track from any other cell first
+                            List<int> keysToCheck = new List<int>(cellAssignments.Keys);
+                            foreach (int key in keysToCheck)
+                            {
+                                cellAssignments[key].Remove(selectedTrackForPlacement);
+                                if (cellAssignments[key].Count == 0)
+                                {
+                                    cellAssignments.Remove(key);
+                                }
+                            }
+
+                            // Add to this cell
+                            if (!cellAssignments.ContainsKey(capturedCellIndex))
+                            {
+                                cellAssignments[capturedCellIndex] = new List<VideoTrack>();
+                            }
+                            cellAssignments[capturedCellIndex].Add(selectedTrackForPlacement);
+
+                            // Clear selection and refresh list
+                            selectedTrackForPlacement = null;
+                            trackListBox.ClearSelected();
+                            refreshTrackList();
+
+                            // Rebuild grid to show updated assignments
+                            rebuildGrid();
+                        }
+                    };
+
+                    cellPanel.Click += cellClick;
+                    cellLabel.Click += cellClick;
+
+                    gridCellContainer.Controls.Add(cellPanel, col, row);
+                }
+            }
+        };
+
+        // Handle track selection - map listbox index to actual unassigned track
+        trackListBox.SelectedIndexChanged += (sender, e) =>
+        {
+            if (trackListBox.SelectedIndex >= 0)
+            {
+                // Find the actual track from the display name
+                string selectedName = trackListBox.SelectedItem.ToString();
+                foreach (VideoTrack vt in selectedTracks)
+                {
+                    string displayName = string.IsNullOrEmpty(vt.Name) ? "Track " + vt.Index : vt.Name;
+                    if (displayName == selectedName)
+                    {
+                        selectedTrackForPlacement = vt;
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                selectedTrackForPlacement = null;
+            }
+        };
+
+        // Handle grid size change
+        foreach (RadioButton rb in gridRadios)
+        {
+            rb.CheckedChanged += (sender, e) =>
+            {
+                if (((RadioButton)sender).Checked)
+                {
+                    // Clear assignments when grid size changes
+                    cellAssignments.Clear();
+                    refreshTrackList();
+                    rebuildGrid();
+                }
+            };
+        }
+
+        // Initial grid build
+        rebuildGrid();
 
         form.AcceptButton = applyButton;
 
@@ -247,8 +477,7 @@ public class EntryPoint
         {
             // Get selected grid size
             int gridSize = 2;
-            RadioButton[] radioButtons = { grid2x2, grid3x3, grid4x4, grid5x5, grid6x6 };
-            foreach (RadioButton rb in radioButtons)
+            foreach (RadioButton rb in gridRadios)
             {
                 if (rb.Checked)
                 {
@@ -257,67 +486,90 @@ public class EntryPoint
                 }
             }
 
+            // Save settings
+            SaveSettings(scaleSlider.Value, gridSize);
+
             // Get scale factor
             double scaleFactor = scaleSlider.Value / 1000.0;
 
-            // Collect all selected video tracks
-            List<VideoTrack> selectedTracks = new List<VideoTrack>();
-
-            foreach (Track track in vegas.Project.Tracks)
+            // Check if any tracks are assigned
+            int assignedCount = 0;
+            foreach (var kvp in cellAssignments)
             {
-                if (track.Selected && track.IsVideo())
-                {
-                    selectedTracks.Add((VideoTrack)track);
-                }
+                assignedCount += kvp.Value.Count;
             }
 
-            if (selectedTracks.Count == 0)
+            if (assignedCount == 0)
             {
-                MessageBox.Show("No video tracks selected. Please select at least one video track.",
-                               "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("No tracks assigned to grid cells. Please click on tracks in the list, then click grid cells to assign them.",
+                               "No Assignments", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
-            // Apply to all selected tracks
-            int processedCount = 0;
-
-            foreach (VideoTrack track in selectedTracks)
+            // Process each assigned track
+            foreach (var kvp in cellAssignments)
             {
-                // Get current dimensions (default to 1.0 if no keyframes)
-                double currentWidth = 1.0;
-                double currentHeight = 1.0;
+                int cellIndex = kvp.Key;
+                List<VideoTrack> tracksInCell = kvp.Value;
+
+                // Calculate row and column from cell index
+                int row = cellIndex / gridSize;
+                int col = cellIndex % gridSize;
+
+                // Calculate position in pixels relative to center (Vegas uses center as 0,0)
+                // Project dimensions
+                int projectWidth = vegas.Project.Video.Width;
+                int projectHeight = vegas.Project.Video.Height;
                 
-                if (track.TrackMotion.MotionKeyframes.Count > 0)
+                // Cell size in pixels
+                double cellWidth = (double)projectWidth / gridSize;
+                double cellHeight = (double)projectHeight / gridSize;
+                
+                // Position: offset from center
+                // For col=0 in 3x3: (0 - 1) * cellWidth = -cellWidth (left of center)
+                // For col=1 in 3x3: (1 - 1) * cellWidth = 0 (center)
+                // For col=2 in 3x3: (2 - 1) * cellWidth = +cellWidth (right of center)
+                // Note: Vegas Y-axis is inverted (positive Y = up), so we negate the row offset
+                double centerOffset = (gridSize - 1) / 2.0;
+                double posX = (col - centerOffset) * cellWidth;
+                double posY = (centerOffset - row) * cellHeight;  // Inverted: top row = positive Y
+
+                foreach (VideoTrack track in tracksInCell)
                 {
-                    currentWidth = track.TrackMotion.MotionKeyframes[0].Width;
-                    currentHeight = track.TrackMotion.MotionKeyframes[0].Height;
+                    // Get current dimensions (default to 1.0 if no keyframes)
+                    double currentWidth = 1.0;
+                    double currentHeight = 1.0;
+
+                    if (track.TrackMotion.MotionKeyframes.Count > 0)
+                    {
+                        currentWidth = track.TrackMotion.MotionKeyframes[0].Width;
+                        currentHeight = track.TrackMotion.MotionKeyframes[0].Height;
+                    }
+
+                    // Calculate new dimensions
+                    double newWidth = (currentWidth / gridSize) * scaleFactor;
+                    double newHeight = (currentHeight / gridSize) * scaleFactor;
+
+                    // Clear existing track motion
+                    track.TrackMotion.MotionKeyframes.Clear();
+
+                    // Vegas auto-creates a default keyframe, just modify that one
+                    TrackMotionKeyframe keyframe;
+                    if (track.TrackMotion.MotionKeyframes.Count > 0)
+                    {
+                        keyframe = track.TrackMotion.MotionKeyframes[0];
+                    }
+                    else
+                    {
+                        keyframe = track.TrackMotion.InsertMotionKeyframe(Timecode.FromFrames(0));
+                    }
+
+                    // Set dimensions and position
+                    keyframe.Width = newWidth;
+                    keyframe.Height = newHeight;
+                    keyframe.PositionX = posX;
+                    keyframe.PositionY = posY;
                 }
-
-                // Calculate new dimensions
-                double newWidth = (currentWidth / gridSize) * scaleFactor;
-                double newHeight = (currentHeight / gridSize) * scaleFactor;
-
-                // Clear existing track motion
-                track.TrackMotion.MotionKeyframes.Clear();
-
-                // Vegas auto-creates a default keyframe, just modify that one
-                TrackMotionKeyframe keyframe;
-                if (track.TrackMotion.MotionKeyframes.Count > 0)
-                {
-                    keyframe = track.TrackMotion.MotionKeyframes[0];
-                }
-                else
-                {
-                    keyframe = track.TrackMotion.InsertMotionKeyframe(Timecode.FromFrames(0));
-                }
-
-                // Set dimensions (centered position, scaled size)
-                keyframe.Width = newWidth;
-                keyframe.Height = newHeight;
-                keyframe.PositionX = 0.5; // Center X
-                keyframe.PositionY = 0.5; // Center Y
-
-                processedCount++;
             }
         }
     }
